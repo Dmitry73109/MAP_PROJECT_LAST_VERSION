@@ -5,30 +5,40 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/> 
   <title>Routes Map</title>
   <link rel="stylesheet" href="styles.css" />
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /> <!-- leaflet styles -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 </head>
 <body>
-  <div id="controls"> <!-- sidebar up left -->
+  <div id="controls">
     <button id="newRouteBtn">New Route</button>
     <button id="clearRoutesBtn">Delete All Routes</button>
+    <button id="resetProgressBtn">Reset Progress</button>
     <div id="routeList"></div>
   </div>
 
   <div id="map"></div>
 
-  <ul id="contextMenu"> <!-- marker menu for rmb click -->
+  <!-- Marker context menu -->
+  <ul id="contextMenu">
+    <li data-action="activate">Activate Here</li>
     <li data-action="add-before">Add Before</li>
     <li data-action="add-after">Add After</li>
     <li data-action="rename">Rename</li>
     <li data-action="delete">Delete</li>
   </ul>
 
-  <div id="routeInfo"> <!-- info panel with time -->
+  <!-- Route context menu -->
+  <ul id="routeContextMenu">
+    <li data-action="rename-route">Rename Route</li>
+    <li data-action="delete-route">Delete Route</li>
+  </ul>
+
+  <!-- Info panel -->
+  <div id="routeInfo">
     <strong id="routeName">Route: –</strong>
     <div id="routeDistance">Distance: 0 km</div>
     <div>
       <label for="speedInput">Speed (km/h):</label>
-      <input id="speedInput" type="number" value="5" min="0" /> <!-- speed input -->
+      <input id="speedInput" type="number" value="5" min="0" />
     </div>
     <div id="routeTime">Travel Time: –</div>
   </div>

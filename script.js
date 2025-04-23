@@ -1,408 +1,456 @@
+// script.js — full version with progress, rename/delete, save/load,
+// plus remaining distance/time calculation on “Activate Here”
+
 const map = L.map('map').setView([43.2140, 27.9147], 13);
 const contextMenu = document.getElementById('contextMenu');
+const routeContextMenu = document.getElementById('routeContextMenu');
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
-// Store all routes here; each route holds its markers, polyline, etc.
 let routes = [];
-// Index of the route currently selected in the sidebar
 let currentRouteIndex = null;
-// The marker that was right-clicked to open the context menu
 let currentContextMarker = null;
+let activeSegment = null;   // green progress line
 
-/* ─────────────── UI EVENT LISTENERS ─────────────── */
-
-// Create a brand-new route object when user clicks "New Route"
+// UI event bindings
 document.getElementById("newRouteBtn")
   .addEventListener("click", createNewRoute);
-
-// Remove all routes and clear storage on "Delete All Routes"
 document.getElementById("clearRoutesBtn")
   .addEventListener("click", clearAllRoutes);
-
-// When the speed input changes, recalc distance & time for active route
+document.getElementById("resetProgressBtn")
+  .addEventListener("click", () => {
+    // clear all progress
+    routes.forEach(r => {
+      r.midMarkers.forEach(m =>
+        m.setStyle({ color: r.color, fillColor: '#fff' })
+      );
+      r.activeIndex = null;
+    });
+    if (activeSegment) {
+      map.removeLayer(activeSegment);
+      activeSegment = null;
+    }
+    saveRoutesToLocalStorage();
+    updateRoutePath();
+  });
 document.getElementById("speedInput")
   .addEventListener("input", updateRoutePath);
 
-// Click anywhere outside context menu hides it
+// hide menus on outside click
 document.addEventListener('click', e => {
   if (!contextMenu.contains(e.target)) hideContextMenu();
+  if (!routeContextMenu.contains(e.target)) hideRouteContextMenu();
 });
 
-// Handle clicks on the context menu items (delete/add/rename)
+// — Marker (point) context menu —
+// includes "activate", add/delete/rename
 contextMenu.addEventListener('click', e => {
-  if (!currentContextMarker) return;  // no marker selected?
-
-  // Find which route this marker belongs to
+  if (!currentContextMarker) return;
   const route = routes.find(r => r.midMarkers.includes(currentContextMarker));
   if (!route) return;
-
   const idx = route.midMarkers.indexOf(currentContextMarker);
   const latlng = currentContextMarker.getLatLng();
+  const action = e.target.dataset.action;
 
-  // Delete this midpoint
-  if (e.target.dataset.action === 'delete') {
+  if (action === 'activate') {
+    // save progress index
+    route.activeIndex = idx;
+
+    // clear old green line
+    if (activeSegment) {
+      map.removeLayer(activeSegment);
+      activeSegment = null;
+    }
+    // reset all midpoint styles
+    route.midMarkers.forEach(m =>
+      m.setStyle({ color: route.color, fillColor: '#fff' })
+    );
+    // coords from start to chosen marker
+    const elapsedCoords = [
+      route.start.getLatLng(),
+      ...route.midMarkers.slice(0, idx + 1).map(m => m.getLatLng())
+    ];
+    // draw green line
+    activeSegment = L.polyline(elapsedCoords, {
+      color: 'green', weight: 5, interactive: false
+    }).addTo(map);
+    // color visited points green
+    route.midMarkers.slice(0, idx + 1)
+      .forEach(m => m.setStyle({ color: 'green', fillColor: 'lightgreen' }));
+
+    hideContextMenu();
+    saveRoutesToLocalStorage();
+    updateRoutePath();
+    return;
+  }
+
+  if (action === 'delete') {
     map.removeLayer(currentContextMarker);
     route.midMarkers.splice(idx, 1);
-
-  // Add a new point before this one
-  } else if (e.target.dataset.action === 'add-before') {
+  } else if (action === 'add-before') {
     const prev = route.midMarkers[idx - 1] || route.start;
     if (prev) {
-      const newLatLng = interpolate(latlng, prev.getLatLng());
-      const m = createMidpointMarker(newLatLng, route);
-      route.midMarkers.splice(idx, 0, m);
+      const p = interpolate(latlng, prev.getLatLng());
+      route.midMarkers.splice(idx, 0, createMidpointMarker(p, route));
     }
-
-  // Add a new point after this one
-  } else if (e.target.dataset.action === 'add-after') {
+  } else if (action === 'add-after') {
     const next = route.midMarkers[idx + 1] || route.end;
     if (next) {
-      const newLatLng = interpolate(latlng, next.getLatLng());
-      const m = createMidpointMarker(newLatLng, route);
-      route.midMarkers.splice(idx + 1, 0, m);
+      const p = interpolate(latlng, next.getLatLng());
+      route.midMarkers.splice(idx + 1, 0, createMidpointMarker(p, route));
     }
-
-  // Rename this point
-  } else if (e.target.dataset.action === 'rename') {
+  } else if (action === 'rename') {
     renameMarker(currentContextMarker);
   }
 
-  // Close menu and refresh path/storage
   currentContextMarker = null;
   hideContextMenu();
   updateRoutePath();
   saveRoutesToLocalStorage();
 });
 
+// — Route context menu —
+// rename or delete entire route
+routeContextMenu.addEventListener('click', e => {
+  const action = e.target.dataset.action;
+  if (currentRouteIndex === null) return;
 
-/* ─────────────── ROUTE MANAGEMENT ─────────────── */
+  if (action === 'rename-route') {
+    const name = prompt('Rename Route:', routes[currentRouteIndex].name);
+    if (name && name.trim()) {
+      routes[currentRouteIndex].name = name.trim();
+      updateRouteList();
+      saveRoutesToLocalStorage();
+    }
+  }
+  else if (action === 'delete-route') {
+    const r = routes[currentRouteIndex];
+    [r.start, r.end].forEach(m => m && map.removeLayer(m));
+    r.midMarkers.forEach(m => map.removeLayer(m));
+    if (r.polyline) map.removeLayer(r.polyline);
+    routes.splice(currentRouteIndex, 1);
+    currentRouteIndex = routes.length ? 0 : null;
+    updateRouteList();
+    updateRoutePath();
+    saveRoutesToLocalStorage();
+  }
 
-// Create a fresh route object with default values
-function createNewRoute() {
-  const newRoute = {
-    id: Date.now(),               // unique timestamp ID
-    name: `Route ${routes.length + 1}`, 
-    start: null,                  // will hold start marker
-    end: null,                    // will hold end marker
-    midMarkers: [],               // array of intermediate circleMarkers
-    polyline: null,               // Leaflet polyline connecting points
-    visible: true,                // toggles map display
-    color: getRandomColor()       // random hex color for route
-  };
-  routes.push(newRoute);
-  currentRouteIndex = routes.length - 1; // select the newly created route
-  updateRouteList();                      // refresh sidebar
-  saveRoutesToLocalStorage();             // persist change
-}
+  hideRouteContextMenu();
+});
 
-
-/* ─────────────── MAP CLICK HANDLING ─────────────── */
-
-// Listen for clicks on the map to place start/end markers
+// map click → place start/end markers
 map.on('click', e => {
   const el = e.originalEvent.target;
-
-  // Ignore clicks on UI panels, context menu, markers, or lines
   if (
-    el.closest('#controls')    ||
+    el.closest('#controls') ||
     el.closest('#contextMenu') ||
+    el.closest('#routeContextMenu') ||
     el.classList.contains('leaflet-marker-icon') ||
     el.classList.contains('leaflet-interactive')
   ) return;
-
-  // Must have a selected route
   if (currentRouteIndex === null) return;
   const route = routes[currentRouteIndex];
-
-  // Skip if route is hidden via the checkbox
   if (!route.visible) return;
 
   const latlng = e.latlng;
-
-  // First click sets the start point
   if (!route.start) {
     route.start = createMainMarker(latlng, 'Start', route);
-
-  // Second click sets the end point and triggers midpoint creation
   } else if (!route.end) {
     route.end = createMainMarker(latlng, 'End', route);
     createMidPoints(route);
   }
-
-  updateRoutePath();            // draw/update polyline
-  saveRoutesToLocalStorage();   // persist new markers
+  updateRoutePath();
+  saveRoutesToLocalStorage();
 });
 
+// — Factory functions —
+// Create new empty route
+function createNewRoute() {
+  const newRoute = {
+    id: Date.now(),
+    name: `Route ${routes.length + 1}`,
+    start: null,
+    end: null,
+    midMarkers: [],
+    polyline: null,
+    visible: true,
+    color: getRandomColor(),
+    activeIndex: null
+  };
+  routes.push(newRoute);
+  currentRouteIndex = routes.length - 1;
+  updateRouteList();
+  saveRoutesToLocalStorage();
+}
 
-/* ─────────────── MARKER CREATORS ─────────────── */
-
-// Create start/end marker with tooltip and drag behavior
+// Create draggable start/end marker
 function createMainMarker(latlng, label, route) {
-  const marker = L.marker(latlng, { draggable: true });
-  marker.bindTooltip(label, { permanent: true, direction: 'top' });
-
-  // When dragged, re-create mids and re-draw path
-  marker.on('drag', () => {
-    createMidPoints(route);
-    updateRoutePath();
-    saveRoutesToLocalStorage();
-  });
-
-  if (route.visible) marker.addTo(map);
-  return marker;
+  const m = L.marker(latlng, { draggable: true })
+    .bindTooltip(label, { permanent: true, direction: 'top' })
+    .on('drag', () => {
+      createMidPoints(route);
+      updateRoutePath();
+      saveRoutesToLocalStorage();
+    });
+  if (route.visible) m.addTo(map);
+  return m;
 }
 
-// Create a draggable circleMarker for midpoints
+// Create draggable midpoint
 function createMidpointMarker(latlng, route) {
-  const circle = L.circleMarker(latlng, {
-    radius: 8,
-    color: route.color,
-    fillColor: '#fff',
-    fillOpacity: 1,
-    weight: 2
-  });
-  circle.bindTooltip('Point', { permanent: false, direction: 'top' });
+  const c = L.circleMarker(latlng, {
+    radius: 8, color: route.color,
+    fillColor: '#fff', fillOpacity: 1, weight: 2
+  }).bindTooltip('Point', { direction: 'top' });
 
-  enableCircleDragging(circle, route);
-
-  // Open our custom context menu on right-click
-  circle.on('contextmenu', e => {
+  enableCircleDragging(c, route);
+  c.on('contextmenu', e => {
     e.originalEvent.preventDefault();
-    showContextMenu(e, circle);
+    showContextMenu(e, c);
   });
-
-  if (route.visible) circle.addTo(map);
-  return circle;
+  if (route.visible) c.addTo(map);
+  return c;
 }
 
-
-/* ─────────────── MIDPOINT LOGIC ─────────────── */
-
-// Remove old mids and generate new evenly-spaced ones
+// Recompute midpoints between start and end
 function createMidPoints(route) {
   route.midMarkers.forEach(m => map.removeLayer(m));
   route.midMarkers = [];
-
   if (!route.start || !route.end) return;
-
-  const pts = interpolatePoints(
-    route.start.getLatLng(),
-    route.end.getLatLng()
-  );
-
-  pts.forEach(p => {
-    const m = createMidpointMarker(p, route);
-    route.midMarkers.push(m);
-  });
+  interpolatePoints(route.start.getLatLng(), route.end.getLatLng())
+    .forEach(p => route.midMarkers.push(createMidpointMarker(p, route)));
 }
 
-// Split the line into equal segments under maxDist (meters)
+// Evenly split segment into points
 function interpolatePoints(start, end) {
-  const distance = map.distance(start, end);
-  const maxDist = 300;
-  const count = Math.min(20, Math.max(1, Math.floor(distance / maxDist)));
-
-  const points = [];
-  for (let i = 1; i <= count; i++) {
-    const frac = i / (count + 1);
-    const lat = start.lat + (end.lat - start.lat) * frac;
-    const lng = start.lng + (end.lng - start.lng) * frac;
-    points.push(L.latLng(lat, lng));
+  const d = map.distance(start, end);
+  const cnt = Math.min(20, Math.max(1, Math.floor(d / 300)));
+  const pts = [];
+  for (let i = 1; i <= cnt; i++) {
+    const f = i / (cnt + 1);
+    pts.push(L.latLng(
+      start.lat + (end.lat - start.lat) * f,
+      start.lng + (end.lng - start.lng) * f
+    ));
   }
-  return points;
+  return pts;
 }
 
+// ====================== Rendering & Info ======================
 
-/* ─────────────── DRAW & UPDATE PATH ─────────────── */
-
-// Redraw all polylines and update info panel for the active route
+// Redraw all routes, apply progress and compute remaining
 function updateRoutePath() {
-  routes.forEach((route, idx) => {
-    // Gather all coordinates in sequence
-    const coords = [];
-    if (route.start) coords.push(route.start.getLatLng());
-    coords.push(...route.midMarkers.map(m => m.getLatLng()));
-    if (route.end) coords.push(route.end.getLatLng());
+  if (activeSegment) {
+    map.removeLayer(activeSegment);
+    activeSegment = null;
+  }
 
-    // Remove previous polyline if exists
-    if (route.polyline) map.removeLayer(route.polyline);
+  routes.forEach((r, idx) => {
+    const pts = [];
+    if (r.start) pts.push(r.start.getLatLng());
+    pts.push(...r.midMarkers.map(m => m.getLatLng()));
+    if (r.end) pts.push(r.end.getLatLng());
 
-    // Create new polyline (non-interactive so it won't block markers)
-    route.polyline = L.polyline(coords, {
-      color: route.color,
-      interactive: false
-    });
+    if (r.polyline) map.removeLayer(r.polyline);
+    r.polyline = L.polyline(pts, { color: r.color, interactive: false });
+    if (pts.length >= 2 && r.visible) r.polyline.addTo(map);
 
-    // Only draw on map if route is visible and has at least 2 points
-    if (coords.length >= 2 && route.visible) {
-      route.polyline.addTo(map);
-    }
-
-    // If this is the currently selected route, update stats UI
     if (idx === currentRouteIndex) {
-      const dist = calculateDistance(coords);
-      document.getElementById("routeName").textContent = `Route: ${route.name}`;
-      document.getElementById("routeDistance")
-        .textContent = `Distance: ${dist.toFixed(2)} km`;
-      displayRouteTime(dist);
+      const totalDist = calculateDistance(pts);
+
+      // If progress is set, compute elapsed & remaining
+      if (r.activeIndex != null) {
+        // Elapsed points
+        const elapsedPts = [
+          r.start.getLatLng(),
+          ...r.midMarkers.slice(0, r.activeIndex + 1).map(m => m.getLatLng())
+        ];
+        const elapsedDist = calculateDistance(elapsedPts);
+        const remDist = totalDist - elapsedDist;
+
+        // Re-draw green segment
+        activeSegment = L.polyline(elapsedPts, {
+          color: 'green', weight: 5, interactive: false
+        }).addTo(map);
+        // Style visited points
+        r.midMarkers.slice(0, r.activeIndex + 1)
+          .forEach(m => m.setStyle({ color: 'green', fillColor: 'lightgreen' }));
+
+        // Update info panel: total vs remaining
+        document.getElementById("routeName").textContent = `Route: ${r.name}`;
+        document.getElementById("routeDistance")
+          .textContent = `Total: ${totalDist.toFixed(2)} km, Remaining: ${remDist.toFixed(2)} km`;
+        displayTimeBoth(elapsedDist, remDist);
+      } else {
+        // No progress: show only total
+        document.getElementById("routeName").textContent = `Route: ${r.name}`;
+        document.getElementById("routeDistance")
+          .textContent = `Distance: ${totalDist.toFixed(2)} km`;
+        displayRouteTime(totalDist);
+      }
     }
   });
 }
 
-// Sum up distances between consecutive points
-function calculateDistance(coords) {
-  let total = 0;
-  for (let i = 1; i < coords.length; i++) {
-    total += map.distance(coords[i-1], coords[i]);
+// Sum distances in km
+function calculateDistance(arr) {
+  let sum = 0;
+  for (let i = 1; i < arr.length; i++) {
+    sum += map.distance(arr[i - 1], arr[i]);
   }
-  return total / 1000; // convert meters to kilometers
+  return sum / 1000;
 }
 
-// Show travel time based on distance and speed input
-function displayRouteTime(distanceKm) {
-  const speed = parseFloat(document.getElementById("speedInput").value);
+// Display only total time
+function displayRouteTime(km) {
+  const sp = parseFloat(document.getElementById("speedInput").value);
   const out = document.getElementById("routeTime");
-
-  if (!speed || speed <= 0) {
+  if (!sp || sp <= 0) {
     out.textContent = "Travel Time: –";
     return;
   }
-
-  const hours = distanceKm / speed;
-  const minutesTotal = Math.round(hours * 60);
-  const h = Math.floor(minutesTotal / 60);
-  const m = minutesTotal % 60;
-  const str = h > 0 ? `${h} hr ${m} min` : `${m} min`;
-
-  out.textContent = `Travel Time: ${str}`;
+  const hrs = km / sp;
+  const mins = Math.round(hrs * 60);
+  const h = Math.floor(mins / 60), m = mins % 60;
+  out.textContent = h > 0 ? `${h} hr ${m} min` : `${m} min`;
 }
 
+// Display elapsed & remaining time
+function displayTimeBoth(elapsedKm, remainingKm) {
+  const sp = parseFloat(document.getElementById("speedInput").value);
+  const out = document.getElementById("routeTime");
+  if (!sp || sp <= 0) {
+    out.textContent = "Travel Time: –";
+    return;
+  }
+  const elapsedH = elapsedKm / sp;
+  const remH = remainingKm / sp;
+  const elapsedMins = Math.round(elapsedH * 60);
+  const remMins = Math.round(remH * 60);
+  const eh = Math.floor(elapsedMins / 60), em = elapsedMins % 60;
+  const rh = Math.floor(remMins / 60), rm = remMins % 60;
+  out.innerHTML =
+    `Elapsed: ${eh>0?`${eh}h ${em}m`:`${em}m`}<br>` +
+    `Remaining: ${rh>0?`${rh}h ${rm}m`:`${rm}m`}`;
+}
 
-/* ─────────────── DRAG HANDLER FOR CIRCLES ─────────────── */
-
-// Custom dragging so circleMarker is movable without map panning
+// ====================== Helpers & Context Menus ======================
+// — Drag helper for midpoints —
 function enableCircleDragging(circle, route) {
-  let dragging = false;
-
+  let drag = false;
   circle.on('mousedown', e => {
-    if (e.originalEvent.button === 2) return; // ignore right-click
-    dragging = true;
-    map.dragging.disable(); // stop map from moving
+    if (e.originalEvent.button === 2) return;
+    drag = true; map.dragging.disable();
   });
-
   map.on('mousemove', e => {
-    if (dragging) {
-      circle.setLatLng(e.latlng); // move circle
-      updateRoutePath();          // redraw line
+    if (drag) {
+      circle.setLatLng(e.latlng);
+      updateRoutePath();
     }
   });
-
   map.on('mouseup', () => {
-    if (dragging) {
-      dragging = false;
-      map.dragging.enable();
-      saveRoutesToLocalStorage(); // save new pos
+    if (drag) {
+      drag = false; map.dragging.enable();
+      saveRoutesToLocalStorage();
     }
   });
 }
 
-
-/* ─────────────── SIDEBAR & VISIBILITY ─────────────── */
-
-// Rebuild the sidebar list; add 'active' class to selected route
+// — Sidebar & Context menus —
 function updateRouteList() {
-  const list = document.getElementById('routeList');
-  list.innerHTML = ''; // clear old entries
+  const c = document.getElementById('routeList');
+  c.innerHTML = '';
+  routes.forEach((r, i) => {
+    const div = document.createElement('div');
+    div.className = 'route-item' + (i === currentRouteIndex ? ' active' : '');
+    div.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showRouteContextMenu(e, i);
+    });
 
-  routes.forEach((route, idx) => {
-    const item = document.createElement('div');
-    item.className = 'route-item' + (idx === currentRouteIndex ? ' active' : '');
-
-    // Checkbox to toggle map visibility
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = route.visible;
+    cb.checked = r.visible;
     cb.addEventListener('change', () => {
-      route.visible = cb.checked;
-      updateVisibility(route);
+      r.visible = cb.checked;
+      updateVisibility(r);
       saveRoutesToLocalStorage();
     });
 
-    // Click label to select this route
-    const label = document.createElement('label');
-    label.textContent = route.name;
-    label.addEventListener('click', () => {
-      currentRouteIndex = idx;
+    const lbl = document.createElement('label');
+    lbl.textContent = r.name;
+    lbl.addEventListener('click', () => {
+      currentRouteIndex = i;
       updateRouteList();
       updateRoutePath();
     });
 
-    item.appendChild(cb);
-    item.appendChild(label);
-    list.appendChild(item);
+    div.appendChild(cb);
+    div.appendChild(lbl);
+    c.appendChild(div);
   });
 }
 
-// Show or hide all markers and line for a route
 function updateVisibility(route) {
-  const all = [route.start, route.end, ...route.midMarkers];
-  all.forEach(m => {
-    if (m) {
-      route.visible ? m.addTo(map) : map.removeLayer(m);
-    }
+  [route.start, route.end, ...route.midMarkers].forEach(m => {
+    if (!m) return;
+    route.visible ? m.addTo(map) : map.removeLayer(m);
   });
   if (route.polyline) {
-    route.visible ? route.polyline.addTo(map)
-                  : map.removeLayer(route.polyline);
+    route.visible ? route.polyline.addTo(map) : map.removeLayer(route.polyline);
   }
 }
 
-
-/* ─────────────── CONTEXT MENU HELPERS ─────────────── */
-
-// Position and show our HTML context menu
 function showContextMenu(e, marker) {
   currentContextMarker = marker;
-  contextMenu.style.left = e.originalEvent.pageX + 'px';
-  contextMenu.style.top  = e.originalEvent.pageY + 'px';
+  contextMenu.style.left = `${e.originalEvent.pageX}px`;
+  contextMenu.style.top  = `${e.originalEvent.pageY}px`;
   contextMenu.style.display = 'block';
 }
-
-// Hide the HTML context menu
 function hideContextMenu() {
   contextMenu.style.display = 'none';
   currentContextMarker = null;
 }
 
-// Prompt the user to rename a marker
+function showRouteContextMenu(e, index) {
+  currentRouteIndex = index;
+  routeContextMenu.style.left = `${e.pageX}px`;
+  routeContextMenu.style.top  = `${e.pageY}px`;
+  routeContextMenu.style.display = 'block';
+}
+function hideRouteContextMenu() {
+  routeContextMenu.style.display = 'none';
+}
+
+function interpolate(p1, p2) {
+  return L.latLng(
+    (p1.lat + p2.lat) / 2,
+    (p1.lng + p2.lng) / 2
+  );
+}
+
 function renameMarker(marker) {
   const name = prompt('Enter new name:', marker.options.name || '');
   if (name && name.trim()) {
     marker.options.name = name.trim();
-    marker.bindTooltip(name, { permanent: false, direction: 'top' });
+    marker.bindTooltip(name, { permanent:false, direction:'top' });
   }
 }
 
-// Utility: generate a random hex color
 function getRandomColor() {
   const hex = '0123456789ABCDEF';
-  return '#' + Array.from({ length: 6 }, 
-    () => hex[Math.floor(Math.random() * 16)]
+  return '#' + Array.from({length:6}, () =>
+    hex[Math.floor(Math.random() * 16)]
   ).join('');
 }
 
-
-/* ─────────────── STORAGE ─────────────── */
-
-// Remove all routes from map & memory, clear sidebar & storage
 function clearAllRoutes() {
-  routes.forEach(route => {
-    [route.start, route.end].forEach(m => m && map.removeLayer(m));
-    route.midMarkers.forEach(m => map.removeLayer(m));
-    if (route.polyline) map.removeLayer(route.polyline);
+  routes.forEach(r => {
+    [r.start, r.end].forEach(m => m && map.removeLayer(m));
+    r.midMarkers.forEach(m => map.removeLayer(m));
+    if (r.polyline) map.removeLayer(r.polyline);
   });
   routes = [];
   currentRouteIndex = null;
@@ -410,27 +458,24 @@ function clearAllRoutes() {
   updateRouteList();
 }
 
-// Save entire routes array into localStorage
 function saveRoutesToLocalStorage() {
-  const data = routes.map(route => ({
-    id: route.id,
-    name: route.name,
-    visible: route.visible,
-    color: route.color,
-    start: route.start ? route.start.getLatLng() : null,
-    end:   route.end   ? route.end.getLatLng()   : null,
-    mid:   route.midMarkers.map(m => ({ ...m.getLatLng(), name: m.options.name || '' }))
+  const data = routes.map(r => ({
+    id: r.id,
+    name: r.name,
+    visible: r.visible,
+    color: r.color,
+    start: r.start ? r.start.getLatLng() : null,
+    end:   r.end   ? r.end.getLatLng()   : null,
+    mid:   r.midMarkers.map(m => ({ ...m.getLatLng(), name: m.options.name || '' })),
+    activeIndex: r.activeIndex
   }));
   localStorage.setItem('routes', JSON.stringify(data));
 }
 
-// Load routes back from localStorage on page startup
 function loadRoutesFromLocalStorage() {
   const saved = JSON.parse(localStorage.getItem('routes'));
   if (!saved) return;
-
   routes = saved.map(r => {
-    // Re-create a clean route object
     const obj = {
       id: r.id,
       name: r.name,
@@ -439,30 +484,29 @@ function loadRoutesFromLocalStorage() {
       midMarkers: [],
       polyline: null,
       visible: r.visible,
-      color: r.color
+      color: r.color,
+      activeIndex: r.activeIndex
     };
-    // Re-add start/end if they existed
     if (r.start) obj.start = createMainMarker(r.start, 'Start', obj);
     if (r.end)   obj.end   = createMainMarker(r.end,   'End',   obj);
-    // Re-add any saved midpoints
     obj.midMarkers = r.mid.map(p => {
       const m = createMidpointMarker(p, obj);
-      if (p.name) m.bindTooltip(p.name, { permanent: false, direction: 'top' });
+      if (p.name) m.bindTooltip(p.name, { permanent:false, direction:'top' });
       return m;
     });
-    // Generate mids if needed
     if (obj.start && obj.end && obj.midMarkers.length === 0) {
       createMidPoints(obj);
     }
     return obj;
   });
 
+  // pick first with progress or default
+  if (routes.length > 0) {
+    const idx = routes.findIndex(r => r.activeIndex != null);
+    currentRouteIndex = idx !== -1 ? idx : 0;
+  }
   updateRouteList();
   updateRoutePath();
-
-  // Select first route by default if none chosen
-  if (routes.length && currentRouteIndex === null) currentRouteIndex = 0;
 }
 
-// Immediately load saved routes on script load
 loadRoutesFromLocalStorage();
