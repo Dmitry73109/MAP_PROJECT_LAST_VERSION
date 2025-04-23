@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" /> <!-- charset -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/> 
+  <title>Routes Map</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" /> <!-- leaflet styles -->
+</head>
+<body>
+  <div id="controls"> <!-- sidebar up left -->
+    <button id="newRouteBtn">New Route</button>
+    <button id="clearRoutesBtn">Delete All Routes</button>
+    <div id="routeList"></div>
+  </div>
+
+  <div id="map"></div>
+
+  <ul id="contextMenu"> <!-- marker menu for rmb click -->
+    <li data-action="add-before">Add Before</li>
+    <li data-action="add-after">Add After</li>
+    <li data-action="rename">Rename</li>
+    <li data-action="delete">Delete</li>
+  </ul>
+
+  <div id="routeInfo"> <!-- info panel with time -->
+    <strong id="routeName">Route: –</strong>
+    <div id="routeDistance">Distance: 0 km</div>
+    <div>
+      <label for="speedInput">Speed (km/h):</label>
+      <input id="speedInput" type="number" value="5" min="0" /> <!-- speed input -->
+    </div>
+    <div id="routeTime">Travel Time: –</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
