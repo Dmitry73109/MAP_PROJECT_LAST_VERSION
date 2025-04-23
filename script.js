@@ -1,5 +1,4 @@
-// script.js — full version with progress, rename/delete, save/load,
-// plus remaining distance/time calculation on “Activate Here”
+// script.js — каждый маршрут хранит свой актив и восстанавливает его на загрузке
 
 const map = L.map('map').setView([43.2140, 27.9147], 13);
 const contextMenu = document.getElementById('contextMenu');
@@ -9,43 +8,39 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   attribution: '&copy; OpenStreetMap contributors'
 }).addTo(map);
 
+// Состояние
 let routes = [];
 let currentRouteIndex = null;
 let currentContextMarker = null;
-let activeSegment = null;   // green progress line
+let activeSegments = {}; // { routeId: greenPolyline }
 
-// UI event bindings
-document.getElementById("newRouteBtn")
-  .addEventListener("click", createNewRoute);
-document.getElementById("clearRoutesBtn")
-  .addEventListener("click", clearAllRoutes);
-document.getElementById("resetProgressBtn")
-  .addEventListener("click", () => {
-    // clear all progress
-    routes.forEach(r => {
-      r.midMarkers.forEach(m =>
-        m.setStyle({ color: r.color, fillColor: '#fff' })
-      );
-      r.activeIndex = null;
-    });
-    if (activeSegment) {
-      map.removeLayer(activeSegment);
-      activeSegment = null;
+// UI-события
+document.getElementById("newRouteBtn").addEventListener("click", createNewRoute);
+document.getElementById("clearRoutesBtn").addEventListener("click", clearAllRoutes);
+document.getElementById("resetProgressBtn").addEventListener("click", () => {
+  // сброс прогресса у всех маршрутов
+  routes.forEach(r => {
+    r.activeIndex = null;
+    // сброс стилей точек
+    r.midMarkers.forEach(m => m.setStyle({ color: r.color, fillColor: '#fff' }));
+    // убираем зелёный сегмент, если есть
+    if (activeSegments[r.id]) {
+      map.removeLayer(activeSegments[r.id]);
+      delete activeSegments[r.id];
     }
-    saveRoutesToLocalStorage();
-    updateRoutePath();
   });
-document.getElementById("speedInput")
-  .addEventListener("input", updateRoutePath);
+  saveRoutesToLocalStorage();
+  updateRoutePath();
+});
+document.getElementById("speedInput").addEventListener("input", updateRoutePath);
 
-// hide menus on outside click
+// скрыть меню по клику вне его
 document.addEventListener('click', e => {
   if (!contextMenu.contains(e.target)) hideContextMenu();
   if (!routeContextMenu.contains(e.target)) hideRouteContextMenu();
 });
 
-// — Marker (point) context menu —
-// includes "activate", add/delete/rename
+// — Контекстное меню для midpoint —
 contextMenu.addEventListener('click', e => {
   if (!currentContextMarker) return;
   const route = routes.find(r => r.midMarkers.includes(currentContextMarker));
@@ -55,30 +50,10 @@ contextMenu.addEventListener('click', e => {
   const action = e.target.dataset.action;
 
   if (action === 'activate') {
-    // save progress index
+    // просто сохраняем активную точку у этого маршрута
     route.activeIndex = idx;
-
-    // clear old green line
-    if (activeSegment) {
-      map.removeLayer(activeSegment);
-      activeSegment = null;
-    }
-    // reset all midpoint styles
-    route.midMarkers.forEach(m =>
-      m.setStyle({ color: route.color, fillColor: '#fff' })
-    );
-    // coords from start to chosen marker
-    const elapsedCoords = [
-      route.start.getLatLng(),
-      ...route.midMarkers.slice(0, idx + 1).map(m => m.getLatLng())
-    ];
-    // draw green line
-    activeSegment = L.polyline(elapsedCoords, {
-      color: 'green', weight: 5, interactive: false
-    }).addTo(map);
-    // color visited points green
-    route.midMarkers.slice(0, idx + 1)
-      .forEach(m => m.setStyle({ color: 'green', fillColor: 'lightgreen' }));
+    currentRouteIndex = routes.indexOf(route);
+    updateRouteList(); // подсветка в списке
 
     hideContextMenu();
     saveRoutesToLocalStorage();
@@ -91,45 +66,45 @@ contextMenu.addEventListener('click', e => {
     route.midMarkers.splice(idx, 1);
   } else if (action === 'add-before') {
     const prev = route.midMarkers[idx - 1] || route.start;
-    if (prev) {
-      const p = interpolate(latlng, prev.getLatLng());
-      route.midMarkers.splice(idx, 0, createMidpointMarker(p, route));
-    }
+    const p = interpolate(latlng, prev.getLatLng());
+    route.midMarkers.splice(idx, 0, createMidpointMarker(p, route));
   } else if (action === 'add-after') {
     const next = route.midMarkers[idx + 1] || route.end;
-    if (next) {
-      const p = interpolate(latlng, next.getLatLng());
-      route.midMarkers.splice(idx + 1, 0, createMidpointMarker(p, route));
-    }
+    const p = interpolate(latlng, next.getLatLng());
+    route.midMarkers.splice(idx + 1, 0, createMidpointMarker(p, route));
   } else if (action === 'rename') {
     renameMarker(currentContextMarker);
   }
 
   currentContextMarker = null;
   hideContextMenu();
-  updateRoutePath();
   saveRoutesToLocalStorage();
+  updateRoutePath();
 });
 
-// — Route context menu —
-// rename or delete entire route
+// — Контекстное меню для маршрутов —
 routeContextMenu.addEventListener('click', e => {
-  const action = e.target.dataset.action;
   if (currentRouteIndex === null) return;
+  const action = e.target.dataset.action;
+  const route = routes[currentRouteIndex];
 
   if (action === 'rename-route') {
-    const name = prompt('Rename Route:', routes[currentRouteIndex].name);
-    if (name && name.trim()) {
-      routes[currentRouteIndex].name = name.trim();
+    const name = prompt('Rename Route:', route.name);
+    if (name) {
+      route.name = name.trim();
       updateRouteList();
       saveRoutesToLocalStorage();
     }
   }
-  else if (action === 'delete-route') {
-    const r = routes[currentRouteIndex];
-    [r.start, r.end].forEach(m => m && map.removeLayer(m));
-    r.midMarkers.forEach(m => map.removeLayer(m));
-    if (r.polyline) map.removeLayer(r.polyline);
+  if (action === 'delete-route') {
+    // удаляем все слои маршрута
+    [route.start, route.end, ...route.midMarkers].forEach(m => m && map.removeLayer(m));
+    if (activeSegments[route.id]) {
+      map.removeLayer(activeSegments[route.id]);
+      delete activeSegments[route.id];
+    }
+    if (route.polyline) map.removeLayer(route.polyline);
+    // удаляем из массива
     routes.splice(currentRouteIndex, 1);
     currentRouteIndex = routes.length ? 0 : null;
     updateRouteList();
@@ -140,7 +115,7 @@ routeContextMenu.addEventListener('click', e => {
   hideRouteContextMenu();
 });
 
-// map click → place start/end markers
+// — Клик по карте: ставим start/end —
 map.on('click', e => {
   const el = e.originalEvent.target;
   if (
@@ -161,15 +136,16 @@ map.on('click', e => {
     route.end = createMainMarker(latlng, 'End', route);
     createMidPoints(route);
   }
-  updateRoutePath();
   saveRoutesToLocalStorage();
+  updateRoutePath();
 });
 
-// — Factory functions —
-// Create new empty route
+// === Фабрики ===
+
 function createNewRoute() {
+  const id = Date.now();
   const newRoute = {
-    id: Date.now(),
+    id,
     name: `Route ${routes.length + 1}`,
     start: null,
     end: null,
@@ -185,20 +161,18 @@ function createNewRoute() {
   saveRoutesToLocalStorage();
 }
 
-// Create draggable start/end marker
 function createMainMarker(latlng, label, route) {
   const m = L.marker(latlng, { draggable: true })
     .bindTooltip(label, { permanent: true, direction: 'top' })
     .on('drag', () => {
       createMidPoints(route);
-      updateRoutePath();
       saveRoutesToLocalStorage();
+      updateRoutePath();
     });
   if (route.visible) m.addTo(map);
   return m;
 }
 
-// Create draggable midpoint
 function createMidpointMarker(latlng, route) {
   const c = L.circleMarker(latlng, {
     radius: 8, color: route.color,
@@ -214,7 +188,6 @@ function createMidpointMarker(latlng, route) {
   return c;
 }
 
-// Recompute midpoints between start and end
 function createMidPoints(route) {
   route.midMarkers.forEach(m => map.removeLayer(m));
   route.midMarkers = [];
@@ -223,7 +196,6 @@ function createMidPoints(route) {
     .forEach(p => route.midMarkers.push(createMidpointMarker(p, route)));
 }
 
-// Evenly split segment into points
 function interpolatePoints(start, end) {
   const d = map.distance(start, end);
   const cnt = Math.min(20, Math.max(1, Math.floor(d / 300)));
@@ -238,14 +210,16 @@ function interpolatePoints(start, end) {
   return pts;
 }
 
-// ====================== Rendering & Info ======================
+// === Отрисовка и информация ===
 
-// Redraw all routes, apply progress and compute remaining
 function updateRoutePath() {
-  if (activeSegment) {
-    map.removeLayer(activeSegment);
-    activeSegment = null;
-  }
+  // сбросить все midpoint в исходный цвет
+  routes.forEach(r => {
+    r.midMarkers.forEach(m => m.setStyle({ color: r.color, fillColor: '#fff' }));
+  });
+  // удалить все старые зелёные сегменты
+  Object.values(activeSegments).forEach(seg => map.removeLayer(seg));
+  activeSegments = {};
 
   routes.forEach((r, idx) => {
     const pts = [];
@@ -253,48 +227,45 @@ function updateRoutePath() {
     pts.push(...r.midMarkers.map(m => m.getLatLng()));
     if (r.end) pts.push(r.end.getLatLng());
 
+    // основная линия
     if (r.polyline) map.removeLayer(r.polyline);
     r.polyline = L.polyline(pts, { color: r.color, interactive: false });
     if (pts.length >= 2 && r.visible) r.polyline.addTo(map);
 
-    if (idx === currentRouteIndex) {
-      const totalDist = calculateDistance(pts);
+    // если у этого маршрута есть прогресс — рисуем
+    if (r.activeIndex != null && r.visible) {
+      const elapsed = [
+        r.start.getLatLng(),
+        ...r.midMarkers.slice(0, r.activeIndex + 1).map(m => m.getLatLng())
+      ];
+      const total = calculateDistance(pts);
+      const elapsedDist = calculateDistance(elapsed);
+      const rem = total - elapsedDist;
 
-      // If progress is set, compute elapsed & remaining
-      if (r.activeIndex != null) {
-        // Elapsed points
-        const elapsedPts = [
-          r.start.getLatLng(),
-          ...r.midMarkers.slice(0, r.activeIndex + 1).map(m => m.getLatLng())
-        ];
-        const elapsedDist = calculateDistance(elapsedPts);
-        const remDist = totalDist - elapsedDist;
+      activeSegments[r.id] = L.polyline(elapsed, {
+        color: 'green', weight: 5, interactive: false
+      }).addTo(map);
 
-        // Re-draw green segment
-        activeSegment = L.polyline(elapsedPts, {
-          color: 'green', weight: 5, interactive: false
-        }).addTo(map);
-        // Style visited points
-        r.midMarkers.slice(0, r.activeIndex + 1)
-          .forEach(m => m.setStyle({ color: 'green', fillColor: 'lightgreen' }));
+      r.midMarkers.slice(0, r.activeIndex + 1)
+        .forEach(m => m.setStyle({ color: 'green', fillColor: 'lightgreen' }));
 
-        // Update info panel: total vs remaining
+      if (idx === currentRouteIndex) {
         document.getElementById("routeName").textContent = `Route: ${r.name}`;
         document.getElementById("routeDistance")
-          .textContent = `Total: ${totalDist.toFixed(2)} km, Remaining: ${remDist.toFixed(2)} km`;
-        displayTimeBoth(elapsedDist, remDist);
-      } else {
-        // No progress: show only total
-        document.getElementById("routeName").textContent = `Route: ${r.name}`;
-        document.getElementById("routeDistance")
-          .textContent = `Distance: ${totalDist.toFixed(2)} km`;
-        displayRouteTime(totalDist);
+          .textContent = `Total: ${total.toFixed(2)} km, Remaining: ${rem.toFixed(2)} km`;
+        displayTimeBoth(elapsedDist, rem);
       }
+
+    } else if (idx === currentRouteIndex) {
+      const d = calculateDistance(pts);
+      document.getElementById("routeName").textContent = `Route: ${r.name}`;
+      document.getElementById("routeDistance")
+        .textContent = `Distance: ${d.toFixed(2)} km`;
+      displayRouteTime(d);
     }
   });
 }
 
-// Sum distances in km
 function calculateDistance(arr) {
   let sum = 0;
   for (let i = 1; i < arr.length; i++) {
@@ -303,41 +274,29 @@ function calculateDistance(arr) {
   return sum / 1000;
 }
 
-// Display only total time
 function displayRouteTime(km) {
   const sp = parseFloat(document.getElementById("speedInput").value);
   const out = document.getElementById("routeTime");
-  if (!sp || sp <= 0) {
-    out.textContent = "Travel Time: –";
-    return;
-  }
-  const hrs = km / sp;
-  const mins = Math.round(hrs * 60);
+  if (!sp || sp <= 0) { out.textContent = "Travel Time: –"; return; }
+  const hrs = km / sp, mins = Math.round(hrs * 60);
   const h = Math.floor(mins / 60), m = mins % 60;
-  out.textContent = h > 0 ? `${h} hr ${m} min` : `${m} min`;
+  out.textContent = h ? `${h} hr ${m} min` : `${m} min`;
 }
 
-// Display elapsed & remaining time
-function displayTimeBoth(elapsedKm, remainingKm) {
+function displayTimeBoth(elapsedKm, remKm) {
   const sp = parseFloat(document.getElementById("speedInput").value);
   const out = document.getElementById("routeTime");
-  if (!sp || sp <= 0) {
-    out.textContent = "Travel Time: –";
-    return;
-  }
-  const elapsedH = elapsedKm / sp;
-  const remH = remainingKm / sp;
-  const elapsedMins = Math.round(elapsedH * 60);
-  const remMins = Math.round(remH * 60);
-  const eh = Math.floor(elapsedMins / 60), em = elapsedMins % 60;
-  const rh = Math.floor(remMins / 60), rm = remMins % 60;
+  if (!sp || sp <= 0) { out.textContent = "Travel Time: –"; return; }
+  const eM = Math.round((elapsedKm/sp)*60), rM = Math.round((remKm/sp)*60);
+  const eh = Math.floor(eM/60), em = eM%60;
+  const rh = Math.floor(rM/60), rm = rM%60;
   out.innerHTML =
-    `Elapsed: ${eh>0?`${eh}h ${em}m`:`${em}m`}<br>` +
-    `Remaining: ${rh>0?`${rh}h ${rm}m`:`${rm}m`}`;
+    `Elapsed: ${eh?`${eh}h ${em}m`:`${em}m`}<br>` +
+    `Remaining: ${rh?`${rh}h ${rm}m`:`${rm}m`}`;
 }
 
-// ====================== Helpers & Context Menus ======================
-// — Drag helper for midpoints —
+// === Помощники и меню ===
+
 function enableCircleDragging(circle, route) {
   let drag = false;
   circle.on('mousedown', e => {
@@ -347,18 +306,15 @@ function enableCircleDragging(circle, route) {
   map.on('mousemove', e => {
     if (drag) {
       circle.setLatLng(e.latlng);
+      saveRoutesToLocalStorage();
       updateRoutePath();
     }
   });
   map.on('mouseup', () => {
-    if (drag) {
-      drag = false; map.dragging.enable();
-      saveRoutesToLocalStorage();
-    }
+    if (drag) { drag = false; map.dragging.enable(); }
   });
 }
 
-// — Sidebar & Context menus —
 function updateRouteList() {
   const c = document.getElementById('routeList');
   c.innerHTML = '';
@@ -366,8 +322,7 @@ function updateRouteList() {
     const div = document.createElement('div');
     div.className = 'route-item' + (i === currentRouteIndex ? ' active' : '');
     div.addEventListener('contextmenu', e => {
-      e.preventDefault();
-      showRouteContextMenu(e, i);
+      e.preventDefault(); showRouteContextMenu(e, i);
     });
 
     const cb = document.createElement('input');
@@ -377,6 +332,7 @@ function updateRouteList() {
       r.visible = cb.checked;
       updateVisibility(r);
       saveRoutesToLocalStorage();
+      updateRoutePath();
     });
 
     const lbl = document.createElement('label');
@@ -393,16 +349,6 @@ function updateRouteList() {
   });
 }
 
-function updateVisibility(route) {
-  [route.start, route.end, ...route.midMarkers].forEach(m => {
-    if (!m) return;
-    route.visible ? m.addTo(map) : map.removeLayer(m);
-  });
-  if (route.polyline) {
-    route.visible ? route.polyline.addTo(map) : map.removeLayer(route.polyline);
-  }
-}
-
 function showContextMenu(e, marker) {
   currentContextMarker = marker;
   contextMenu.style.left = `${e.originalEvent.pageX}px`;
@@ -414,8 +360,8 @@ function hideContextMenu() {
   currentContextMarker = null;
 }
 
-function showRouteContextMenu(e, index) {
-  currentRouteIndex = index;
+function showRouteContextMenu(e, idx) {
+  currentRouteIndex = idx;
   routeContextMenu.style.left = `${e.pageX}px`;
   routeContextMenu.style.top  = `${e.pageY}px`;
   routeContextMenu.style.display = 'block';
@@ -424,38 +370,54 @@ function hideRouteContextMenu() {
   routeContextMenu.style.display = 'none';
 }
 
-function interpolate(p1, p2) {
-  return L.latLng(
-    (p1.lat + p2.lat) / 2,
-    (p1.lng + p2.lng) / 2
-  );
+function updateVisibility(route) {
+  // если скрываем — убрать зелёный сегмент
+  if (!route.visible && activeSegments[route.id]) {
+    map.removeLayer(activeSegments[route.id]);
+    delete activeSegments[route.id];
+  }
+  // прячем/показываем все маркеры
+  [route.start, route.end, ...route.midMarkers].forEach(m => {
+    if (!m) return;
+    route.visible ? m.addTo(map) : map.removeLayer(m);
+  });
+  // прячем/показываем основную линию
+  if (route.polyline) {
+    route.visible ? route.polyline.addTo(map) : map.removeLayer(route.polyline);
+  }
+}
+
+function clearAllRoutes() {
+  routes.forEach(r => {
+    [r.start, r.end, ...r.midMarkers].forEach(m => m && map.removeLayer(m));
+    if (r.polyline) map.removeLayer(r.polyline);
+    if (activeSegments[r.id]) map.removeLayer(activeSegments[r.id]);
+  });
+  routes = [];
+  currentRouteIndex = null;
+  activeSegments = {};
+  localStorage.removeItem('routes');
+  updateRouteList();
 }
 
 function renameMarker(marker) {
   const name = prompt('Enter new name:', marker.options.name || '');
-  if (name && name.trim()) {
+  if (name) {
     marker.options.name = name.trim();
-    marker.bindTooltip(name, { permanent:false, direction:'top' });
+    marker.bindTooltip(marker.options.name, { permanent:false, direction:'top' });
+    saveRoutesToLocalStorage();
   }
+}
+
+function interpolate(p1, p2) {
+  return L.latLng((p1.lat + p2.lat)/2, (p1.lng + p2.lng)/2);
 }
 
 function getRandomColor() {
   const hex = '0123456789ABCDEF';
   return '#' + Array.from({length:6}, () =>
-    hex[Math.floor(Math.random() * 16)]
+    hex[Math.floor(Math.random()*16)]
   ).join('');
-}
-
-function clearAllRoutes() {
-  routes.forEach(r => {
-    [r.start, r.end].forEach(m => m && map.removeLayer(m));
-    r.midMarkers.forEach(m => map.removeLayer(m));
-    if (r.polyline) map.removeLayer(r.polyline);
-  });
-  routes = [];
-  currentRouteIndex = null;
-  localStorage.removeItem('routes');
-  updateRouteList();
 }
 
 function saveRoutesToLocalStorage() {
@@ -466,7 +428,7 @@ function saveRoutesToLocalStorage() {
     color: r.color,
     start: r.start ? r.start.getLatLng() : null,
     end:   r.end   ? r.end.getLatLng()   : null,
-    mid:   r.midMarkers.map(m => ({ ...m.getLatLng(), name: m.options.name || '' })),
+    mid:   r.midMarkers.map(m => ({ ...m.getLatLng(), name: m.options.name||'' })),
     activeIndex: r.activeIndex
   }));
   localStorage.setItem('routes', JSON.stringify(data));
@@ -499,11 +461,12 @@ function loadRoutesFromLocalStorage() {
     }
     return obj;
   });
-
-  // pick first with progress or default
-  if (routes.length > 0) {
+  // сразу применить флаг visible и убрать лишние сегменты
+  routes.forEach(r => updateVisibility(r));
+  // выбрать маршрут с прогрессом или первый
+  if (routes.length) {
     const idx = routes.findIndex(r => r.activeIndex != null);
-    currentRouteIndex = idx !== -1 ? idx : 0;
+    currentRouteIndex = idx >= 0 ? idx : 0;
   }
   updateRouteList();
   updateRoutePath();
