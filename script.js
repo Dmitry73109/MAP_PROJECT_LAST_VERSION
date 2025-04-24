@@ -162,15 +162,17 @@ function createNewRoute() {
 }
 
 function createMainMarker(latlng, label, route) {
-  const m = L.marker(latlng, { draggable: true })
+  const marker = L.marker(latlng, { draggable: true })
     .bindTooltip(label, { permanent: true, direction: 'top' })
     .on('drag', () => {
-      createMidPoints(route);
       saveRoutesToLocalStorage();
       updateRoutePath();
     });
-  if (route.visible) m.addTo(map);
-  return m;
+
+  if (route.visible) {
+    marker.addTo(map);
+  }
+  return marker;
 }
 
 function createMidpointMarker(latlng, route) {
@@ -247,7 +249,7 @@ function updateRoutePath() {
       }).addTo(map);
 
       r.midMarkers.slice(0, r.activeIndex + 1)
-        .forEach(m => m.setStyle({ color: 'green', fillColor: 'lightgreen' }));
+        .forEach(m => m.setStyle({ color: 'green', fillColor: 'green' }));
 
       if (idx === currentRouteIndex) {
         document.getElementById("routeName").textContent = `Route: ${r.name}`;
