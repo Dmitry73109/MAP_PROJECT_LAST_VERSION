@@ -463,15 +463,14 @@ function loadRoutesFromLocalStorage() {
     }
     return obj;
   });
-  // сразу применить флаг visible и убрать лишние сегменты
   routes.forEach(r => updateVisibility(r));
-  // выбрать маршрут с прогрессом или первый
   if (routes.length) {
     const idx = routes.findIndex(r => r.activeIndex != null);
     currentRouteIndex = idx >= 0 ? idx : 0;
   }
   updateRouteList();
   updateRoutePath();
+  console.log("everything is ok");
 }
 
 loadRoutesFromLocalStorage();
